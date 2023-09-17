@@ -1,5 +1,6 @@
 mod hash_table;
 mod linear_probing;
+mod lsmt;
 
 #[cfg(test)]
 mod tests {
@@ -158,7 +159,6 @@ mod tests {
             let value = rng.gen::<u64>();
             my_table.set(key, value);
             table.insert(key, value);
-            assert_eq!(my_table.len(), table.len());
         }
         for _ in 0..ITERS {
             let key = rng.gen::<u64>();

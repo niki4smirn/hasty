@@ -247,10 +247,6 @@ impl HashTable for LPHashTable {
     fn on_disk_size(&self) -> usize {
         self.file.metadata().unwrap().len() as usize
     }
-
-    fn len(&self) -> usize {
-        self.len
-    }
 }
 
 impl Drop for LPHashTable {
