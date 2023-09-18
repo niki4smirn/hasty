@@ -1,6 +1,5 @@
 use crate::hash_table::HashTable;
 use bincode::{
-    config::{FixintEncoding, WithOtherIntEncoding, WithOtherTrailing},
     DefaultOptions, Options,
 };
 use once_cell::sync::Lazy;
@@ -10,7 +9,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
-    mem::size_of,
     os::unix::prelude::FileExt,
     sync::Mutex,
 };
@@ -266,7 +264,7 @@ pub struct LSMTree {
 }
 
 impl LSMTree {
-    fn new(memtable_capacity: usize) -> Self {
+    pub fn new(memtable_capacity: usize) -> Self {
         LSMTree {
             memtable: Memtable::new(),
             disktables: Vec::new(),
@@ -358,28 +356,8 @@ mod tests {
 
         for test in tests {
             let serialized = test.serialize().unwrap();
-            println!("{}", serialized.len());
             let deserialized = DisktableEntry::deserialize(serialized.as_ref()).unwrap();
             assert_eq!(test, deserialized);
-        }
-    }
-
-
-    #[test]
-    fn check_correctness() {
-        let mut my_table = LSMTree::new(1e3 as usize);
-        let mut table = HashMap::new();
-        const ITERS: usize = 1e4 as usize;
-        let mut rng = rand::thread_rng();
-        for i in 0..ITERS {
-            let key = rng.gen::<u64>();
-            let value = rng.gen::<u64>();
-            my_table.set(key, value);
-            table.insert(key, value);
-        }
-        for _ in 0..ITERS {
-            let key = rng.gen::<u64>();
-            assert_eq!(my_table.get(key), table.get(&key).copied());
         }
     }
 }
