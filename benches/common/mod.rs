@@ -1,5 +1,3 @@
-mod linear_probing;
-
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::fs;

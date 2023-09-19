@@ -1,19 +1,20 @@
+mod compaction;
+
 use crate::hash_table::HashTable;
-use bincode::{
-    DefaultOptions, Options,
-};
+use bincode::{DefaultOptions, Options};
 use once_cell::sync::Lazy;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Reverse,
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::prelude::FileExt,
+    os::unix::prelude::{FileExt, MetadataExt},
     sync::Mutex,
 };
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 enum DisktableEntry {
     Insert { rev: u64, key: u64, value: u64 },
     Delete { rev: u64, key: u64 },
@@ -61,7 +62,7 @@ impl DisktableEntry {
     }
 }
 
-struct Disktable {
+pub(crate) struct Disktable {
     file: fs::File,
     size: usize,
 }
@@ -75,22 +76,31 @@ impl<'a> Iterator for DisktableIter<'a> {
     type Item = DisktableEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let step = DisktableEntry::bin_size() as usize;
-        if self.pos == self.disktable.len() * step {
+        if self.pos == self.disktable.len() {
             return None;
         }
         let res = self.disktable.read_pos(self.pos);
-        self.pos += step;
+        self.pos += 1;
         Some(res)
     }
 }
 
 struct DisktableRepository {
-    used_filenames: HashSet<String>,
+    used_filenames: Vec<String>,
+    // each inode correspnds used_filename
+    inodes: Vec<u64>,
     last_rev: u64,
 }
 
 impl DisktableRepository {
+    fn new() -> Self {
+        Self {
+            used_filenames: Vec::new(),
+            inodes: Vec::new(),
+            last_rev: 0,
+        }
+    }
+
     const FILENAME_LEN: usize = 12;
     fn generate_filename(&mut self) -> String {
         rand::thread_rng()
@@ -106,16 +116,35 @@ impl DisktableRepository {
             filename = self.generate_filename();
         }
 
-        self.used_filenames.insert(filename.clone());
+        self.used_filenames.push(filename.clone());
 
         fs::create_dir_all("lsmt").unwrap();
 
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(format!("lsmt/{}", filename))
-            .unwrap()
+            .unwrap();
+
+        self.inodes.push(file.metadata().unwrap().ino());
+
+        file
+    }
+
+    fn delete_file(&mut self, inode: u64) {
+        let mut index = None;
+        for i in 0..self.inodes.len() {
+            if self.inodes[i] == inode {
+                index = Some(i);
+                break;
+            }
+        }
+        assert!(index.is_some());
+        let index = index.unwrap();
+        let filename = self.used_filenames.remove(index);
+        fs::remove_file(format!("lsmt/{}", filename)).unwrap();
+        self.inodes.remove(index);
     }
 
     fn from_memtable(&mut self, memtable: Memtable) -> Disktable {
@@ -151,42 +180,29 @@ impl DisktableRepository {
         Disktable { file, size }
     }
 
-    fn merge(&mut self, dtable1: Disktable, dtable2: Disktable) -> Disktable {
-        let mut pos1 = 0;
-        let mut pos2 = 0;
-        let mut merged = Vec::with_capacity(dtable1.len() + dtable2.len());
-        while pos1 < dtable1.len() && pos2 < dtable2.len() {
-            let v1 = dtable1.read_pos(pos1);
-            let v2 = dtable2.read_pos(pos2);
-            match v1.get_key().cmp(&v2.get_key()) {
-                std::cmp::Ordering::Less => {
-                    merged.push(v1);
-                    pos1 += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    merged.push(v2);
-                    pos2 += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    match v1.get_rev().cmp(&v2.get_rev()) {
-                        std::cmp::Ordering::Less => {
-                            merged.push(v1);
-                        }
-                        std::cmp::Ordering::Greater => {
-                            merged.push(v2);
-                        }
-                        std::cmp::Ordering::Equal => unreachable!(),
-                    }
-                    pos1 += 1;
-                    pos2 += 1;
-                }
+    fn merge(&mut self, diktables: Vec<Disktable>) -> Disktable {
+        let mut merged = Vec::with_capacity(diktables.iter().map(|dtable| dtable.len()).sum());
+        let mut heap = std::collections::BinaryHeap::from_iter((0..diktables.len()).map(|i| {
+            let entry = &diktables[i].read_pos(0);
+            (Reverse(entry.get_key()), entry.get_rev(), 0, i)
+        }));
+        let mut last_key = None;
+        while let Some((key, _, pos, i)) = heap.pop() {
+            if last_key == Some(key) {
+                continue;
             }
-        }
-        while pos1 < dtable1.len() {
-            merged.push(dtable1.read_pos(pos1));
-        }
-        while pos2 < dtable2.len() {
-            merged.push(dtable2.read_pos(pos2));
+            last_key = Some(key);
+
+            merged.push(diktables[i].read_pos(pos));
+            if pos + 1 < diktables[i].len() {
+                let next_entry = &diktables[i].read_pos(pos + 1);
+                heap.push((
+                    Reverse(next_entry.get_key()),
+                    next_entry.get_rev(),
+                    pos + 1,
+                    i,
+                ));
+            }
         }
 
         self.from_iter(merged.into_iter())
@@ -194,10 +210,7 @@ impl DisktableRepository {
 }
 
 static DISKTABLE_REPOSITORY: Lazy<Mutex<DisktableRepository>> = Lazy::new(|| {
-    Mutex::new(DisktableRepository {
-        used_filenames: HashSet::new(),
-        last_rev: 0,
-    })
+    Mutex::new(DisktableRepository::new())
 });
 
 impl<'a> Disktable {
@@ -210,17 +223,14 @@ impl<'a> Disktable {
 }
 
 impl Disktable {
-    fn get(&self, key: u64) -> Option<u64> {
+    // returns (value, rev)
+    fn get(&self, key: u64) -> Option<(u64, u64)> {
         for read in self.iter() {
             if read.get_key() != key {
                 continue;
             }
             match read {
-                DisktableEntry::Insert {
-                    rev: _,
-                    key,
-                    value: _,
-                } => return Some(key),
+                DisktableEntry::Insert { rev, key: _, value } => return Some((value, rev)),
                 DisktableEntry::Delete { rev: _, key: _ } => return None,
             }
         }
@@ -228,8 +238,11 @@ impl Disktable {
     }
 
     fn read_pos(&self, pos: usize) -> DisktableEntry {
+        assert!(pos < self.len());
         let mut bytes = [0; DisktableEntry::bin_size()];
-        self.file.read_at(&mut bytes, pos as u64).unwrap();
+        self.file
+            .read_at(&mut bytes, (pos * DisktableEntry::bin_size()) as u64)
+            .unwrap();
         DisktableEntry::deserialize(&bytes).unwrap()
     }
 
@@ -239,6 +252,15 @@ impl Disktable {
 
     fn len(&self) -> usize {
         self.size
+    }
+}
+
+impl Drop for Disktable {
+    fn drop(&mut self) {
+        DISKTABLE_REPOSITORY
+            .lock()
+            .unwrap()
+            .delete_file(self.file.metadata().unwrap().ino());
     }
 }
 
@@ -258,16 +280,16 @@ impl FromIterator<DisktableEntry> for Disktable {
 
 pub struct LSMTree {
     memtable: Memtable,
-    disktables: Vec<Disktable>,
+    compactor: Box<dyn compaction::Compactor>,
     mem_sz_threshold: usize,
     disktable_num: usize,
 }
 
 impl LSMTree {
-    pub fn new(memtable_capacity: usize) -> Self {
+    pub fn new(memtable_capacity: usize, max_tier_size: usize) -> Self {
         LSMTree {
             memtable: Memtable::new(),
-            disktables: Vec::new(),
+            compactor: Box::new(compaction::TieredCompaction::new(max_tier_size)),
             mem_sz_threshold: memtable_capacity,
             disktable_num: 0,
         }
@@ -284,19 +306,11 @@ impl HashTable for LSMTree {
         if let Some(value) = self.memtable.get(&key) {
             return *value;
         }
-        for disktable in self.disktables.iter().rev() {
-            if let Some(value) = disktable.get(key) {
-                return Some(value);
-            }
-        }
-        None
+        self.compactor.get(key)
     }
 
     fn on_disk_size(&self) -> usize {
-        self.disktables
-            .iter()
-            .map(|disktable| disktable.on_disk_size())
-            .sum()
+        self.compactor.on_disk_size()
     }
 
     fn remove(&mut self, key: u64) {
@@ -309,7 +323,7 @@ impl LSMTree {
     fn flush_on_threshold(&mut self) {
         if self.memtable.len() >= self.mem_sz_threshold {
             let disktable = Disktable::from(self.memtable.clone());
-            self.disktables.push(disktable);
+            self.compactor.add(disktable);
             self.memtable.clear();
             self.disktable_num += 1;
         }

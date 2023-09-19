@@ -6,6 +6,9 @@ use hasty::linear_probing::{LPHashTable, LPHashTableOptions};
 use std::fs;
 use std::io::Write;
 
+// these were functions to measure things manualy
+// TODO: rewrite as criterion benches
+
 #[test]
 fn measure_write() {
     let filename = "lp4.bin".to_string();

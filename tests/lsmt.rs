@@ -7,11 +7,14 @@ mod tests {
 
     #[test]
     fn check_correctness() {
-        let mut my_table = LSMTree::new(1e3 as usize);
+        let mut my_table = LSMTree::new(1e3 as usize, 4usize);
         let mut table = HashMap::new();
         const WRITE_ITERS: usize = 1e4 as usize;
         let mut rng = rand::thread_rng();
-        for _ in 0..WRITE_ITERS {
+        for i in 0..WRITE_ITERS {
+            if i % 100 == 0 {
+                println!("{}/{}", i, WRITE_ITERS);
+            }
             let key = rng.gen::<u64>();
             let value = rng.gen::<u64>();
             my_table.set(key, value);
