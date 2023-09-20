@@ -2,7 +2,7 @@
 mod tests {
     use hasty::lsmt::LSMTree;
     use rand::Rng;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, fs};
     use hasty::hash_table::HashTable;
 
     #[test]
@@ -28,5 +28,6 @@ mod tests {
             }
             assert_eq!(my_table.get(key), table.get(&key).copied());
         }
+        fs::remove_dir_all("lsmt").unwrap();
     }
 }

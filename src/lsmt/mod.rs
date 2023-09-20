@@ -180,10 +180,10 @@ impl DisktableRepository {
         Disktable { file, size }
     }
 
-    fn merge(&mut self, diktables: Vec<Disktable>) -> Disktable {
-        let mut merged = Vec::with_capacity(diktables.iter().map(|dtable| dtable.len()).sum());
-        let mut heap = std::collections::BinaryHeap::from_iter((0..diktables.len()).map(|i| {
-            let entry = &diktables[i].read_pos(0);
+    fn merge(&mut self, disktables: Vec<Disktable>) -> Disktable {
+        let mut merged = Vec::with_capacity(disktables.iter().map(|dtable| dtable.len()).sum());
+        let mut heap = std::collections::BinaryHeap::from_iter((0..disktables.len()).map(|i| {
+            let entry = &disktables[i].read_pos(0);
             (Reverse(entry.get_key()), entry.get_rev(), 0, i)
         }));
         let mut last_key = None;
@@ -193,9 +193,9 @@ impl DisktableRepository {
             }
             last_key = Some(key);
 
-            merged.push(diktables[i].read_pos(pos));
-            if pos + 1 < diktables[i].len() {
-                let next_entry = &diktables[i].read_pos(pos + 1);
+            merged.push(disktables[i].read_pos(pos));
+            if pos + 1 < disktables[i].len() {
+                let next_entry = &disktables[i].read_pos(pos + 1);
                 heap.push((
                     Reverse(next_entry.get_key()),
                     next_entry.get_rev(),
@@ -205,13 +205,16 @@ impl DisktableRepository {
             }
         }
 
+        for disktable in disktables {
+            self.delete_file(disktable.file.metadata().unwrap().ino());
+        }
+
         self.from_iter(merged.into_iter())
     }
 }
 
-static DISKTABLE_REPOSITORY: Lazy<Mutex<DisktableRepository>> = Lazy::new(|| {
-    Mutex::new(DisktableRepository::new())
-});
+static DISKTABLE_REPOSITORY: Lazy<Mutex<DisktableRepository>> =
+    Lazy::new(|| Mutex::new(DisktableRepository::new()));
 
 impl<'a> Disktable {
     fn iter(&'a self) -> DisktableIter<'a> {
@@ -252,15 +255,6 @@ impl Disktable {
 
     fn len(&self) -> usize {
         self.size
-    }
-}
-
-impl Drop for Disktable {
-    fn drop(&mut self) {
-        DISKTABLE_REPOSITORY
-            .lock()
-            .unwrap()
-            .delete_file(self.file.metadata().unwrap().ino());
     }
 }
 
