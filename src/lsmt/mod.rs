@@ -2,6 +2,7 @@ mod compaction;
 
 use crate::hash_table::HashTable;
 use bincode::{DefaultOptions, Options};
+use bloom::{BloomFilter, ASMS};
 use once_cell::sync::Lazy;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,53 @@ impl DisktableEntry {
 pub(crate) struct Disktable {
     file: fs::File,
     size: usize,
+    bloom_filter: BloomFilter,
+}
+
+impl<'a> Disktable {
+    fn iter(&'a self) -> DisktableIter<'a> {
+        DisktableIter {
+            disktable: self,
+            pos: 0,
+        }
+    }
+}
+
+impl Disktable {
+    // returns (value, rev)
+    fn get(&self, key: u64) -> Option<(u64, u64)> {
+        if !self.bloom_filter.contains(&key) {
+            return None;
+        }
+
+        for read in self.iter() {
+            if read.get_key() != key {
+                continue;
+            }
+            match read {
+                DisktableEntry::Insert { rev, key: _, value } => return Some((value, rev)),
+                DisktableEntry::Delete { rev: _, key: _ } => return None,
+            }
+        }
+        None
+    }
+
+    fn read_pos(&self, pos: usize) -> DisktableEntry {
+        assert!(pos < self.len());
+        let mut bytes = [0; DisktableEntry::bin_size()];
+        self.file
+            .read_at(&mut bytes, (pos * DisktableEntry::bin_size()) as u64)
+            .unwrap();
+        DisktableEntry::deserialize(&bytes).unwrap()
+    }
+
+    fn on_disk_size(&self) -> usize {
+        self.file.metadata().unwrap().len() as usize
+    }
+
+    fn len(&self) -> usize {
+        self.size
+    }
 }
 
 struct DisktableIter<'a> {
@@ -168,16 +216,29 @@ impl DisktableRepository {
         self.from_iter(entries.into_iter())
     }
 
-    fn from_iter<T: IntoIterator<Item = DisktableEntry>>(&mut self, iter: T) -> Disktable {
+    fn from_iter<T>(&mut self, iter: T) -> Disktable
+    where
+        T: IntoIterator<Item = DisktableEntry> + Clone,
+    {
         let mut size = 0;
         let mut file = self.create_file();
-        for entry in iter {
-            let bytes = entry.serialize().unwrap();
-            file.write_all(&bytes).unwrap();
+        let iter2 = iter.clone();
+        for _ in iter2 {
             size += 1;
         }
 
-        Disktable { file, size }
+        let mut bloom_filter = BloomFilter::with_rate(0.1, size as u32);
+        for entry in iter {
+            let bytes = entry.serialize().unwrap();
+            file.write_all(&bytes).unwrap();
+            bloom_filter.insert(&entry.get_key());
+        }
+
+        Disktable {
+            file,
+            size,
+            bloom_filter,
+        }
     }
 
     fn merge(&mut self, disktables: Vec<Disktable>) -> Disktable {
@@ -216,59 +277,11 @@ impl DisktableRepository {
 static DISKTABLE_REPOSITORY: Lazy<Mutex<DisktableRepository>> =
     Lazy::new(|| Mutex::new(DisktableRepository::new()));
 
-impl<'a> Disktable {
-    fn iter(&'a self) -> DisktableIter<'a> {
-        DisktableIter {
-            disktable: self,
-            pos: 0,
-        }
-    }
-}
-
-impl Disktable {
-    // returns (value, rev)
-    fn get(&self, key: u64) -> Option<(u64, u64)> {
-        for read in self.iter() {
-            if read.get_key() != key {
-                continue;
-            }
-            match read {
-                DisktableEntry::Insert { rev, key: _, value } => return Some((value, rev)),
-                DisktableEntry::Delete { rev: _, key: _ } => return None,
-            }
-        }
-        None
-    }
-
-    fn read_pos(&self, pos: usize) -> DisktableEntry {
-        assert!(pos < self.len());
-        let mut bytes = [0; DisktableEntry::bin_size()];
-        self.file
-            .read_at(&mut bytes, (pos * DisktableEntry::bin_size()) as u64)
-            .unwrap();
-        DisktableEntry::deserialize(&bytes).unwrap()
-    }
-
-    fn on_disk_size(&self) -> usize {
-        self.file.metadata().unwrap().len() as usize
-    }
-
-    fn len(&self) -> usize {
-        self.size
-    }
-}
-
 type Memtable = HashMap<u64, Option<u64>>;
 
 impl From<Memtable> for Disktable {
     fn from(memtable: Memtable) -> Self {
         DISKTABLE_REPOSITORY.lock().unwrap().from_memtable(memtable)
-    }
-}
-
-impl FromIterator<DisktableEntry> for Disktable {
-    fn from_iter<T: IntoIterator<Item = DisktableEntry>>(iter: T) -> Self {
-        DISKTABLE_REPOSITORY.lock().unwrap().from_iter(iter)
     }
 }
 
