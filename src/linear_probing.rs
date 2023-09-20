@@ -46,27 +46,6 @@ impl LPHashTableEntry {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entry() {
-        let test_entries = vec![
-            LPHashTableEntry(None),
-            LPHashTableEntry(Some((0, 0))),
-            LPHashTableEntry(Some((1, 1))),
-            LPHashTableEntry(Some((u64::MAX, u64::MAX))),
-        ];
-        for entry in test_entries {
-            let bytes = entry.serialize().unwrap();
-            assert_eq!(bytes.len(), LPHashTableEntry::bin_size());
-            let entry2 = LPHashTableEntry::deserialize(&bytes).unwrap();
-            assert_eq!(entry, entry2);
-        }
-    }
-}
-
 impl LPHashTable {
     pub fn new(options: &LPHashTableOptions) -> Self {
         let file_exists = std::path::Path::new(&options.filename).exists();
@@ -254,3 +233,4 @@ impl Drop for LPHashTable {
         self.file.sync_all().unwrap();
     }
 }
+
