@@ -1,4 +1,4 @@
-use crate::lsmt::{Disktable, DISKTABLE_REPOSITORY};
+use crate::lsmt::{Disktable, DisktableEntry, DISKTABLE_REPOSITORY};
 
 pub(crate) trait Compactor {
     fn add(&mut self, disktable: Disktable);
@@ -26,17 +26,15 @@ impl Compactor for TieredCompaction {
             self.levels.push(Vec::new());
         }
         self.levels[0].push(disktable);
-        if self.levels[0].len() > self.max_files_per_level {
-            let mut level = 0;
-            while self.levels[level].len() > self.max_files_per_level {
-                let mut temp = Vec::new();
-                std::mem::swap(&mut self.levels[level], &mut temp);
-                if level + 1 == self.levels.len() {
-                    self.levels.push(Vec::new());
-                }
-                self.levels[level + 1].push(DISKTABLE_REPOSITORY.lock().unwrap().merge(temp));
-                level += 1;
+        let mut level = 0;
+        while self.levels[level].len() > self.max_files_per_level {
+            let mut temp = Vec::new();
+            std::mem::swap(&mut self.levels[level], &mut temp);
+            if level + 1 == self.levels.len() {
+                self.levels.push(Vec::new());
             }
+            self.levels[level + 1].push(DISKTABLE_REPOSITORY.lock().unwrap().merge(temp));
+            level += 1;
         }
     }
 
@@ -45,10 +43,25 @@ impl Compactor for TieredCompaction {
         let mut found_val = None;
         for level in self.levels.iter() {
             for disktable in level.iter().rev() {
-                if let Some((val, rev)) = disktable.get(key) {
-                    if found_rev.is_none() || found_rev.unwrap() < rev {
-                        found_rev = Some(rev);
-                        found_val = Some(val);
+                if let Some(entry) = disktable.get(key) {
+                    // previously, here was a bug where we would return value even though it was deleted
+                    // TODO: make a test for this
+                    // check_correctness worked, because
+                    // 1. input is random
+                    // 2. small number of SSTables
+                    match entry {
+                        DisktableEntry::Insert { rev, key: _, value } => {
+                            if found_rev.is_none() || found_rev.unwrap() < rev {
+                                found_rev = Some(rev);
+                                found_val = Some(value);
+                            }
+                        }
+                        DisktableEntry::Delete { rev, key: _ } => {
+                            if found_rev.is_none() || found_rev.unwrap() < rev {
+                                found_rev = Some(rev);
+                                found_val = None;
+                            }
+                        }
                     }
                 }
             }

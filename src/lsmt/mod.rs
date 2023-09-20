@@ -79,8 +79,7 @@ impl<'a> Disktable {
 }
 
 impl Disktable {
-    // returns (value, rev)
-    fn get(&self, key: u64) -> Option<(u64, u64)> {
+    fn get(&self, key: u64) -> Option<DisktableEntry> {
         if !self.bloom_filter.contains(&key) {
             return None;
         }
@@ -89,10 +88,7 @@ impl Disktable {
             if read.get_key() != key {
                 continue;
             }
-            match read {
-                DisktableEntry::Insert { rev, key: _, value } => return Some((value, rev)),
-                DisktableEntry::Delete { rev: _, key: _ } => return None,
-            }
+            return Some(read);
         }
         None
     }
